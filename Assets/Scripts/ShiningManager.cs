@@ -5,31 +5,28 @@ using UnityEngine;
 using OscJack;
 
 public class ShiningManager : MonoBehaviour {
-	public AudioSource hihatAudioSource;
-	public AudioSource snareAudioSource;
-	public AudioSource percAudioSource;
-	public AudioSource kickAudioSource;
+	public Song song;
 
-	public float bpm = 130.0f;
+	public int numberOfFourBars;
+	public float detectedBpm;
 
-	public Stage[] stages;
+	public bool isOrpheStepped;
 
-	public bool orpheStep;
-
-	public int stageNumber = 0;
-	public int noteIndex = 0;
-	public float score = 0f;
-	public int missed = 0;
+	public int progress = 0;
 
 	private OSCClient orpheOSCClient;
 	private OSCClient openDMXUSBOSCClient;
+
 	private float elapsedTimeAfterLastNote;
-	private float timeToNextNote;
+	private float timeToNextQuarterNote;
 	private int quarterNoteCount;
 
-	private float timeSinceStageStart;
-	private List<float> sampleTimeArray;
-	private List<float> stepTimeArray;
+	private float timeToNextLoopStart;
+	private bool isNextLoopScheduled;
+
+	private List<AudioSource> audioSources = new List<AudioSource>();
+
+	public List<float> stepTimeArray = new List<float> ();
 
 	void Start () {
 		orpheOSCClient = new OSCClient ("localhost", 4321);
@@ -37,63 +34,83 @@ public class ShiningManager : MonoBehaviour {
 
 		openDMXUSBOSCClient = new OSCClient ("localhost", 7770);
 
-		timeToNextNote = 60f / bpm;
+		GameObject audioSourcesGameObject = new GameObject ("Song");
+		for (int i = 0; ; i++) {
+			AudioClip clip = (AudioClip)Resources.Load (string.Format("{0}/{1:000}", song.title , i));
 
-		StartStage ();
-		Beat ();
+			if (!clip) {
+				numberOfFourBars = i;
+				break;
+			}
+			
+			AudioSource audioSource = audioSourcesGameObject.AddComponent<AudioSource> ();
+			audioSource.clip = clip;
+			audioSource.bypassEffects = true;
+			audioSources.Add (audioSource);
+		}
+
+		audioSources[progress].loop = true;
+		audioSources[progress].PlayDelayed (0.5f);
+
+		timeToNextQuarterNote = 0.45f + 60f / song.bpm;
 	}
 
 	void Update () {
+		CaptureOrphe ();
+
+		if (isOrpheStepped) {
+			stepTimeArray.Add (Time.timeSinceLevelLoad);
+
+			isOrpheStepped = false;
+		}
+
+		if (stepTimeArray.Count > 0 && Time.timeSinceLevelLoad - 60f / song.bpm * 8 > stepTimeArray [0]) {
+			stepTimeArray.RemoveAt (0);
+		}
+
+		float detectedBpmSum = 0.0f;
+		for (int i = 1; i < stepTimeArray.Count; i++) {
+			detectedBpmSum += 60.0f / (stepTimeArray[i] - stepTimeArray[i - 1]);
+		}
+
+		detectedBpm = detectedBpmSum / (stepTimeArray.Count - 1);
+
+		if (audioSources[progress].timeSamples > audioSources[progress].clip.samples / 8 * 7 && !isNextLoopScheduled) {
+			ulong delay = (ulong)(audioSources[progress].clip.samples - audioSources[progress].timeSamples);
+
+			if (song.bpm * 0.8f < detectedBpm && detectedBpm < song.bpm * 1.2f) {
+				audioSources[progress].loop = false;
+				progress++;
+
+				audioSources[progress].loop = true;
+				audioSources[progress].Play (delay);
+
+				openDMXUSBOSCClient.SendSimpleMessage ("/dmx/universe/0", new byte[] { (byte)(song.flashSpeedCurve.Evaluate((float)progress / numberOfFourBars)* 255.0f), (byte)255 });
+			}
+
+			isNextLoopScheduled = true;
+		} else if (audioSources[progress].timeSamples < audioSources[progress].clip.samples / 8 * 7) {
+			isNextLoopScheduled = false;
+		}
+			
 		elapsedTimeAfterLastNote += Time.deltaTime;
 
-		CaptureOrphe ();
 		Beat ();
 	}
 
-	private void StartStage() {
-		noteIndex = 0;
-
-		openDMXUSBOSCClient.SendSimpleMessage ("/dmx/universe/0", new byte[] { (byte)stages[stageNumber].megaFlashSpeed, (byte)stages[stageNumber].megaFlashDimmer });
-
-		sampleTimeArray = new List<float> ();
-		stepTimeArray = new List<float> ();
-
-		float time = Time.timeSinceLevelLoad;
-		for (int i = 0; i < stages [stageNumber].drums.Length; i++) {
-			Stage.DrumSet drumSet = stages [stageNumber].drums[i];
-
-			if (drumSet.kick/* || drumSet.snare*/) {
-				sampleTimeArray.Add (time);
-			}
-				
-			time += 60f / bpm * 4 / 8;
-		}
+	void OnDisable() {
+		openDMXUSBOSCClient.SendSimpleMessage ("/dmx/universe/0", new byte[] { 0, 0 });
 	}
 
 	private void Beat() {
-		if (elapsedTimeAfterLastNote > timeToNextNote) {
-			elapsedTimeAfterLastNote -= timeToNextNote;
+		if (elapsedTimeAfterLastNote > timeToNextQuarterNote) {
+			elapsedTimeAfterLastNote -= timeToNextQuarterNote;
 
-			if (noteIndex == 0) {
-				JudgeStage ();
+			orpheOSCClient.SendSimpleMessage ("/BOTH/triggerLightWithRGBColor", 1, quarterNoteCount == 0 || quarterNoteCount == 3 ? 255 : 0, quarterNoteCount == 1 || quarterNoteCount == 3 ? 255 : 0, quarterNoteCount == 2 || quarterNoteCount == 3 ? 255 : 0);
 
-				StartStage ();
-			}
-				
-			Stage.DrumSet drumSet = stages [stageNumber].drums[noteIndex];
-			if (drumSet.hihat) hihatAudioSource.Play ();
-			if (drumSet.snare) snareAudioSource.Play ();
-			if (drumSet.perc) percAudioSource.Play ();
-			if (drumSet.kick) kickAudioSource.Play ();
+			quarterNoteCount = (quarterNoteCount + 1) % 4;
 
-			if (noteIndex % 2 == 0) {
-				orpheOSCClient.SendSimpleMessage ("/BOTH/triggerLightWithRGBColor", 1, quarterNoteCount == 0 || quarterNoteCount == 3 ? 255 : 0, quarterNoteCount == 1 || quarterNoteCount == 3 ? 255 : 0, quarterNoteCount == 2 || quarterNoteCount == 3 ? 255 : 0);
-
-				quarterNoteCount = (quarterNoteCount + 1) % 4;
-			}
-
-			noteIndex = (noteIndex + 1) % stages [stageNumber].drums.Length;
-			timeToNextNote = 60f / bpm * 4 / 8;
+			timeToNextQuarterNote = 60f / song.bpm;
 		}
 	}
 
@@ -102,7 +119,7 @@ public class ShiningManager : MonoBehaviour {
 			object[] data = OscMaster.GetData("/LEFT/gesture");
 
 			if (data [0].Equals ("STEP")) {
-				orpheStep = true;
+				isOrpheStepped = true;
 			}
 
 			OscMaster.ClearData("/LEFT/gesture");
@@ -112,43 +129,10 @@ public class ShiningManager : MonoBehaviour {
 			object[] data = OscMaster.GetData("/RIGHT/gesture");
 
 			if (data [0].Equals ("STEP")) {
-				orpheStep = true;
+				isOrpheStepped = true;
 			}
 
 			OscMaster.ClearData("/RIGHT/gesture");
-		}
-
-		if (orpheStep) {
-			Debug.Log ("Detect a step @" + Time.timeSinceLevelLoad) ;
-			stepTimeArray.Add (Time.timeSinceLevelLoad);
-		}
-
-		orpheStep = false;
-	}
-
-	private void JudgeStage() {
-		score = 0f;
-
-		if (sampleTimeArray.Count != stepTimeArray.Count) {
-			missed++;
-		} else {
-			for (int i = 0; i < sampleTimeArray.Count; i++) {
-				score += (60f / bpm) - Mathf.Abs (sampleTimeArray [i] - stepTimeArray [i]);
-			}
-
-			if (score < 60f / bpm * 4) {
-				missed--;
-			} else {
-				missed++;
-			}
-		}
-			
-		if (missed == 3) {
-			stageNumber = stageNumber - 1 < 0 ? 0 : stageNumber - 1;
-			missed = 0;
-		} else if (missed == -3) {
-			stageNumber = stageNumber + 1 >= stages.Length ? stages.Length - 1 : stageNumber + 1;
-			missed = 0;
 		}
 	}
 }
