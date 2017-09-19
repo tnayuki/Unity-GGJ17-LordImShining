@@ -11,25 +11,19 @@ public class ShiningManager : MonoBehaviour {
 	public AudioSource kickAudioSource;
 
 	public float bpm = 130.0f;
-
-	public Stage[] stages;
-
-	public bool orpheStep;
-
-	public int stageNumber = 0;
-	public int noteIndex = 0;
 	public float score = 0f;
-	public int missed = 0;
+	public AnimationCurve flashSpeedCurve;
+
+	public bool areStepsContinuous;
 
 	private OSCClient orpheOSCClient;
 	private OSCClient openDMXUSBOSCClient;
-	private float elapsedTimeAfterLastNote;
-	private float timeToNextNote;
-	private int quarterNoteCount;
 
-	private float timeSinceStageStart;
-	private List<float> sampleTimeArray;
-	private List<float> stepTimeArray;
+	private float elapsedTimeAfterLastBeat;
+	private float timeToNextBeat;
+	private int beatCount;
+
+	private List<float> stepTimeArray = new List<float>();
 
 	void Start () {
 		orpheOSCClient = new OSCClient ("localhost", 4321);
@@ -37,118 +31,99 @@ public class ShiningManager : MonoBehaviour {
 
 		openDMXUSBOSCClient = new OSCClient ("localhost", 7770);
 
-		timeToNextNote = 60f / bpm;
-
-		StartStage ();
-		Beat ();
+		timeToNextBeat = 60f / bpm;
 	}
 
 	void Update () {
-		elapsedTimeAfterLastNote += Time.deltaTime;
+		elapsedTimeAfterLastBeat += Time.deltaTime;
 
 		CaptureOrphe ();
-		Beat ();
-	}
 
-	private void StartStage() {
-		noteIndex = 0;
+		if (elapsedTimeAfterLastBeat > timeToNextBeat) {
+			elapsedTimeAfterLastBeat -= timeToNextBeat;
 
-		openDMXUSBOSCClient.SendSimpleMessage ("/dmx/universe/0", new byte[] { (byte)stages[stageNumber].megaFlashSpeed, (byte)stages[stageNumber].megaFlashDimmer });
+			beatCount = (beatCount + 1) % 4;
 
-		sampleTimeArray = new List<float> ();
-		stepTimeArray = new List<float> ();
+//			if (hihat || snare || perc || kick) {
+//				kickAudioSource.Play ();
+//
+//				hihat = snare = perc = kick = false;
+//			}
+			if (areStepsContinuous) {
+				score += 0.025f;
+				if (score > 1.0f) {
+					score = 1.0f;
+				}
 
-		float time = Time.timeSinceLevelLoad;
-		for (int i = 0; i < stages [stageNumber].drums.Length; i++) {
-			Stage.DrumSet drumSet = stages [stageNumber].drums[i];
+				if (score > 0.6f) {
+					Debug.Log (4);
+					kickAudioSource.Play ();
+					snareAudioSource.Play ();
+					hihatAudioSource.Play ();
 
-			if (drumSet.kick/* || drumSet.snare*/) {
-				sampleTimeArray.Add (time);
+					orpheOSCClient.SendSimpleMessage ("/BOTH/triggerLightWithRGBColor", 1, 255, 255, 255);
+				} else if (score > 0.4f) {
+					Debug.Log (3);
+					kickAudioSource.Play ();
+					hihatAudioSource.Play ();
+					percAudioSource.Play ();
+
+					orpheOSCClient.SendSimpleMessage ("/BOTH/triggerLightWithRGBColor", 1, 255, 0, 0);
+				} else if (score > 0.2f) {
+					Debug.Log (2);
+					kickAudioSource.Play ();
+					hihatAudioSource.Play ();
+
+					orpheOSCClient.SendSimpleMessage ("/BOTH/triggerLightWithRGBColor", 1, 0, 255, 0);
+				} else if (score > 0.0f) {
+					Debug.Log (1);
+					kickAudioSource.Play ();
+					orpheOSCClient.SendSimpleMessage ("/BOTH/triggerLightWithRGBColor", 1, 0, 0, 255);
+				}
+			} else {
+				score -= 0.15f;
+				if (score < 0.0f) {
+					score = 0.0f;
+				}
 			}
-				
-			time += 60f / bpm * 4 / 8;
+
+			TransVibrator.VibrateAll (1.0f);
+			Invoke ("StopTransVibrator", 0.1f);
+
+			areStepsContinuous = false;
+			timeToNextBeat = 60f / bpm;
 		}
-	}
 
-	private void Beat() {
-		if (elapsedTimeAfterLastNote > timeToNextNote) {
-			elapsedTimeAfterLastNote -= timeToNextNote;
-
-			if (noteIndex == 0) {
-				JudgeStage ();
-
-				StartStage ();
-			}
-				
-			Stage.DrumSet drumSet = stages [stageNumber].drums[noteIndex];
-			if (drumSet.hihat) hihatAudioSource.Play ();
-			if (drumSet.snare) snareAudioSource.Play ();
-			if (drumSet.perc) percAudioSource.Play ();
-			if (drumSet.kick) kickAudioSource.Play ();
-
-			if (noteIndex % 2 == 0) {
-				orpheOSCClient.SendSimpleMessage ("/BOTH/triggerLightWithRGBColor", 1, quarterNoteCount == 0 || quarterNoteCount == 3 ? 255 : 0, quarterNoteCount == 1 || quarterNoteCount == 3 ? 255 : 0, quarterNoteCount == 2 || quarterNoteCount == 3 ? 255 : 0);
-
-				quarterNoteCount = (quarterNoteCount + 1) % 4;
-			}
-
-			noteIndex = (noteIndex + 1) % stages [stageNumber].drums.Length;
-			timeToNextNote = 60f / bpm * 4 / 8;
+		float flashSpeed = flashSpeedCurve.Evaluate (score);
+		if (flashSpeed > 1.0f) {
+			flashSpeed = 1.0f;
 		}
+		Debug.Log (flashSpeed);
+		openDMXUSBOSCClient.SendSimpleMessage ("/dmx/universe/0", new byte[] { (byte)(flashSpeed * 255.0f), (byte)(score == 0 ? 0 : 255 )});
 	}
 
 	private void CaptureOrphe () {
-		if (OscMaster.HasData("/LEFT/gesture")) {
-			object[] data = OscMaster.GetData("/LEFT/gesture");
+		foreach (string address in new string[] { "/LEFT/gesture", "/RIGHT/gesture" }) {
+			if (OscMaster.HasData(address)) {
+				object[] data = OscMaster.GetData(address);
 
-			if (data [0].Equals ("STEP")) {
-				orpheStep = true;
+				areStepsContinuous = true;
+				/*
+				if (data [1].Equals ("LEFT") || data [1].Equals ("RIGHT")) {
+					areStepsContinuous = 0;
+
+				} else if (data [1].Equals ("CENTER")) {
+					stepComplexity++;
+				} else if (data [1].Equals ("BACK") || data [1].Equals ("FRONT")) {
+					stepComplexity++;
+				}
+				*/
+				OscMaster.ClearData(address);
 			}
-
-			OscMaster.ClearData("/LEFT/gesture");
 		}
-
-		if (OscMaster.HasData("/RIGHT/gesture")) {
-			object[] data = OscMaster.GetData("/RIGHT/gesture");
-
-			if (data [0].Equals ("STEP")) {
-				orpheStep = true;
-			}
-
-			OscMaster.ClearData("/RIGHT/gesture");
-		}
-
-		if (orpheStep) {
-			Debug.Log ("Detect a step @" + Time.timeSinceLevelLoad) ;
-			stepTimeArray.Add (Time.timeSinceLevelLoad);
-		}
-
-		orpheStep = false;
 	}
 
-	private void JudgeStage() {
-		score = 0f;
-
-		if (sampleTimeArray.Count != stepTimeArray.Count) {
-			missed++;
-		} else {
-			for (int i = 0; i < sampleTimeArray.Count; i++) {
-				score += (60f / bpm) - Mathf.Abs (sampleTimeArray [i] - stepTimeArray [i]);
-			}
-
-			if (score < 60f / bpm * 4) {
-				missed--;
-			} else {
-				missed++;
-			}
-		}
-			
-		if (missed == 3) {
-			stageNumber = stageNumber - 1 < 0 ? 0 : stageNumber - 1;
-			missed = 0;
-		} else if (missed == -3) {
-			stageNumber = stageNumber + 1 >= stages.Length ? stages.Length - 1 : stageNumber + 1;
-			missed = 0;
-		}
+	private void StopTransVibrator() {
+		TransVibrator.VibrateAll (0.0f);
 	}
 }
